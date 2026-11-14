@@ -106,7 +106,7 @@ window.SITE = {
 
   /* ---------- Clinic helper (Cloudflare) ---------- */
   helper: {
-    url: ""   // e.g. "https://sample-clinic-helper.drmirshadck.workers.dev"
+    url: "https://sample-clinic-helper.drmirshadck.workers.dev"   // each clinic gets its own helper
   },
 
   /* ---------- "Consult from anywhere" panel ---------- */

@@ -23,7 +23,7 @@ DOCTORS_JSON = '''[{"id":"sample","name":"Dr. Sample Name","whatsapp":"971586576
 
 [[kv_namespaces]]
 binding = "PUSH"
-id = "REPLACE_WITH_KV_ID"
+id = "beace5d17df743ffa80245a518677060"
 
 # Secrets (never in this file): CAL_KEYS, DAILY_KEYS, PINS, SESSION_SECRET, CAL_WEBHOOK_SECRET,
 # VAPID_PUBLIC_KEY, VAPID_PRIVATE_JWK, WA_TOKEN   ->  node make-secrets.mjs sample=1234 desk=5678
