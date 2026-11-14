@@ -240,13 +240,13 @@ async function hostToken(env, d) {
 /* ---------------- WhatsApp (Meta Cloud API) ---------------- */
 // Fallback texts mirror the approved templates (worker/whatsapp-templates.md) for "tap to send".
 const TEXT = {
-  booking_received: p => `Hello ${p[0]}, we have received your booking request with ${p[1]} at ${p[2]} for ${p[3]}. You will get a confirmation once the clinic verifies your payment. For questions, WhatsApp the clinic at ${p[4]}.`,
-  booking_confirmed: p => `Hello ${p[0]}, your consultation with ${p[1]} at ${p[2]} is confirmed for ${p[3]} (IST). Join on time here: ${p[4]}`,
+  booking_received: p => `Hello ${p[0]}, we have received your booking request with ${p[1]} at ${p[2]} for ${p[3]}. You will get a confirmation once the clinic verifies your payment. For questions, WhatsApp the clinic at ${p[4]}. Thank you.`,
+  booking_confirmed: p => `Hello ${p[0]}, your consultation with ${p[1]} at ${p[2]} is confirmed for ${p[3]} (IST). Join on time here: ${p[4]} Thank you.`,
   booking_declined: p => `Hello ${p[0]}, sorry, ${p[1]} at ${p[2]} cannot take your booking for ${p[3]}. Please book another time or WhatsApp the clinic at ${p[4]}. If you paid, the clinic will refund you.`,
-  reminder_24h: p => `Reminder: Hello ${p[0]}, your consultation with ${p[1]} is tomorrow, ${p[2]} (IST). Join here: ${p[3]}`,
-  reminder_1h: p => `Reminder: Hello ${p[0]}, your consultation with ${p[1]} starts at ${p[2]} (IST), in about an hour. Join here: ${p[3]}`,
-  review_request: p => `Hello ${p[0]}, thank you for consulting ${p[1]}. If you were happy with your care, please leave a short Google review: ${p[2]}`,
-  followup_reminder: p => `Hello ${p[0]}, ${p[1]} would like to see you for a review around ${p[2]}. Book your review here: ${p[3]}`,
+  reminder_24h: p => `Reminder: Hello ${p[0]}, your consultation with ${p[1]} is tomorrow, ${p[2]} (IST). Join here: ${p[3]} Thank you.`,
+  reminder_1h: p => `Reminder: Hello ${p[0]}, your consultation with ${p[1]} starts at ${p[2]} (IST), in about an hour. Join here: ${p[3]} Thank you.`,
+  review_request: p => `Hello ${p[0]}, thank you for consulting ${p[1]}. If you were happy with your care, please leave a short Google review: ${p[2]} Thank you.`,
+  followup_reminder: p => `Hello ${p[0]}, ${p[1]} would like to see you for a review around ${p[2]}. Book your review here: ${p[3]} Thank you.`,
   doctor_new_booking: p => `New booking for ${p[0]}: ${p[1]}, ${p[2]}, ${p[3]} (IST). Open your dashboard to confirm.`
 };
 function digits(s) { let d = String(s || "").replace(/\D/g, ""); if (d.length === 10) d = "91" + d; if (d.startsWith("0")) d = d.replace(/^0+/, ""); return d; }
