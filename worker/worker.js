@@ -13,6 +13,10 @@
  *   POST /leave-delete     {doctor, id}
  *   GET  /report           ?month=YYYY-MM&doctor=all|<id>
  *   GET  /vapid, POST /subscribe {subscription}
+ *   POST /patient-subscribe {doctor, uid, endpoint}  (public, from the site) -> {token}
+ *   GET  /patient-msg?uid=&t=   (patient's phone reads its reminder text)
+ *   Patient app reminders: only the phone's push address is kept, next to the booking id,
+ *   and it expires by itself one hour after the consultation (or when the booking is cancelled).
  *   POST /cal-webhook?d=<doctorId>   (Cal.com, signed)
  *   GET  /last-event, GET /health
  *   cron (every 15 min): WhatsApp reminders 24 h + 1 h before, review request after the consultation
@@ -65,8 +69,11 @@ async function route(req, env, url, fromSite) {
   if (p === "/vapid" && M === "GET") return json({ key: env.VAPID_PUBLIC_KEY || "" });
   if (p === "/last-event" && M === "GET") return json((await env.PUSH.get("lastEvent", "json")) || {});
 
+  if (p === "/patient-msg" && M === "GET") return patientMsg(env, url.searchParams.get("uid"), url.searchParams.get("t"));
+
   if (!fromSite) throw err(403, "Not allowed.");
   if (p === "/login" && M === "POST") return login(req, env);
+  if (p === "/patient-subscribe" && M === "POST") return patientSubscribe(req, env);
 
   const role = await requireSession(req, env);
   const q = url.searchParams;
@@ -287,6 +294,8 @@ async function calWebhook(req, env, docId) {
   const d = doctors(env).find(x => x.id === docId);
   if (!d) return json({ error: "unknown doctor" }, 400);
   await env.PUSH.put("lastEvent", JSON.stringify({ type: known[type], doctor: d.id, at: Date.now() }));
+  const evUid = ev.payload && ev.payload.uid;
+  if (type === "BOOKING_CANCELLED" && evUid && /^[A-Za-z0-9_-]{3,100}$/.test(evUid)) { await env.PUSH.delete("psub:" + evUid); await env.PUSH.delete("pmsg:" + evUid); }
   const pushed = (await pushAll(env, "subs:" + d.id)) + (await pushAll(env, "subs:desk"));
   const wa = [];
   if (type === "BOOKING_REQUESTED" || type === "BOOKING_CREATED") {
@@ -312,10 +321,12 @@ async function runReminders(env) {
         const diff = new Date(b.start).getTime() - now;
         if (diff <= 24 * 3600e3 && diff > 2 * 3600e3 && !(await env.PUSH.get("r24:" + b.uid))) {
           await waSend(env, b.phone, "reminder_24h", [b.name, d.name, when(b.start), joinLink(env, d)]);
+          await pushPatient(env, b.uid, { title: "Consultation tomorrow", body: `Your consultation with ${d.name} is on ${when(b.start)} (IST). Tap to open the consultation room.`, url: joinLink(env, d) });
           await env.PUSH.put("r24:" + b.uid, "1", { expirationTtl: 2 * 86400 });
         }
         if (diff <= 70 * 60e3 && diff > 0 && !(await env.PUSH.get("r1:" + b.uid))) {
           await waSend(env, b.phone, "reminder_1h", [b.name, d.name, timeOnly(b.start), joinLink(env, d)]);
+          await pushPatient(env, b.uid, { title: "Consultation in about an hour", body: `Your consultation with ${d.name} starts at ${timeOnly(b.start)} (IST). Tap to join.`, url: joinLink(env, d) });
           await env.PUSH.put("r1:" + b.uid, "1", { expirationTtl: 2 * 86400 });
         }
       }
@@ -373,6 +384,41 @@ async function report(env, docs, month) {
 }
 
 /* ---------------- web push (doctor/desk phones only) ---------------- */
+/* ---------------- patient app reminders (optional, opt-in) ---------------- */
+const PUSH_HOSTS = /^(fcm\.googleapis\.com|updates\.push\.services\.mozilla\.com|web\.push\.apple\.com|[a-z0-9.-]+\.notify\.windows\.com)$/;
+async function patientSubscribe(req, env) {
+  const { doctor, uid, endpoint } = await body(req);
+  const d = doctors(env).find(x => x.id === doctor);
+  if (!d || !calKey(env, d.id)) throw err(400, "Unknown doctor.");
+  uidOk(uid);
+  let host = ""; try { const u = new URL(String(endpoint || "")); if (u.protocol === "https:") host = u.hostname; } catch (e) {}
+  if (!PUSH_HOSTS.test(host)) throw err(400, "This browser can't receive reminders.");
+  let bk; try { const r = await cal(env, d.id, `/bookings/${encodeURIComponent(uid)}`); bk = r.data || r; } catch (e) { throw err(404, "Booking not found."); }
+  const status = String(bk.status || "").toLowerCase();
+  const end = new Date(bk.end || bk.endTime || bk.start || bk.startTime || 0).getTime();
+  if (!["accepted", "pending", "unconfirmed"].includes(status) || !(end > Date.now())) throw err(400, "This booking can't get reminders.");
+  const token = b64url(crypto.getRandomValues(new Uint8Array(18)));
+  const ttl = Math.max(60, Math.round((end - Date.now()) / 1000) + 3600);
+  await env.PUSH.put("psub:" + uid, JSON.stringify({ e: endpoint, d: d.id, t: token }), { expirationTtl: ttl });
+  return json({ ok: true, token });
+}
+async function pushPatient(env, uid, msg) {
+  const s = await env.PUSH.get("psub:" + uid, "json");
+  if (!s || !env.VAPID_PRIVATE_JWK) return false;
+  await env.PUSH.put("pmsg:" + uid, JSON.stringify({ ...msg, at: Date.now() }), { expirationTtl: 3 * 3600 });
+  try {
+    const r = await sendPush(env, s.e);
+    if (r.status === 404 || r.status === 410) { await env.PUSH.delete("psub:" + uid); return false; }
+    return r.ok;
+  } catch (e) { return false; }
+}
+async function patientMsg(env, uid, t) {
+  if (!/^[A-Za-z0-9_-]{3,100}$/.test(String(uid || ""))) return json({});
+  const s = await env.PUSH.get("psub:" + uid, "json");
+  if (!s || !safeEq(String(t || ""), s.t)) return json({});
+  return json((await env.PUSH.get("pmsg:" + uid, "json")) || {});
+}
+
 async function pushAll(env, key) {
   const subs = (await env.PUSH.get(key, "json")) || [];
   if (!subs.length || !env.VAPID_PRIVATE_JWK) return 0;

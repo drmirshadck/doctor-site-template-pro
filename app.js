@@ -177,6 +177,13 @@ function findEmail(obj, depth) {
   return "";
 }
 
+function findUid(obj, depth) {
+  if (!obj || typeof obj !== "object" || depth > 6) return "";
+  if (typeof obj.uid === "string" && /^[A-Za-z0-9_-]{3,100}$/.test(obj.uid)) return obj.uid;
+  for (const k of Object.keys(obj)) { const r = findUid(obj[k], depth + 1); if (r) return r; }
+  return "";
+}
+
 function render() {
   prog(); sheet.classList.toggle("wide", st.step === 2);
   const t = type();
@@ -234,13 +241,47 @@ function render() {
       <p style="color:var(--muted)">${paid ? "We'll verify your UPI payment and confirm your appointment. A <b>confirmation email</b> with your video consultation link will be sent to" : "A <b>confirmation email</b> with your appointment details will be sent to"}</p>
       <p><b>${esc(st.email || "the email address you entered")}</b></p>
       <p class="small">${paid ? "We'll also send the link to your WhatsApp number. " : ""}Please check your Spam / Junk folder if you don't see the email.</p>
+      <div id="remind"></div>
       <button class="btn btn-solid" id="ok">Close</button></div>`;
     $("#ok", box).onclick = closeSheet;
+    remindOffer($("#remind", box));
   }
 }
 function showDone(data) {
   if (Date.now() - doneAt < 4000) return;   // both Cal events fire for one booking
-  doneAt = Date.now(); st.email = findEmail(data, 0); st.step = 3; render();
+  doneAt = Date.now(); st.email = findEmail(data, 0); st.uid = findUid(data, 0); st.step = 3; render();
+}
+/* ---------- optional app reminders for the patient (Pro) ---------- */
+function remindOffer(el) {
+  const H = (S.helper && S.helper.url || "").replace(/\/$/, "");
+  if (!el || !H || !st.uid) return;
+  const ua = navigator.userAgent;
+  const isIOS = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    if (isIOS && !standalone) el.innerHTML = `<p class="small remind-note">On iPhone, app reminders work after adding this site to your Home Screen. You'll still get your reminders on WhatsApp.</p>`;
+    return;
+  }
+  if (Notification.permission === "denied") return;
+  el.innerHTML = `<div class="remind-box"><b>Get a reminder on this phone</b><span>A notification 1 day and 1 hour before your consultation, with the link to join. Optional — WhatsApp reminders come anyway.</span><button class="btn btn-ghost" id="remindBtn">Turn on reminders</button></div>`;
+  $("#remindBtn", el).onclick = async () => {
+    const btn = $("#remindBtn", el); btn.disabled = true; btn.textContent = "Turning on…";
+    try {
+      if ((await Notification.requestPermission()) !== "granted") throw new Error("Notifications were not allowed.");
+      const reg = await navigator.serviceWorker.register("sw.js"); await navigator.serviceWorker.ready;
+      const { key } = await (await fetch(H + "/vapid")).json();
+      const raw = atob(key.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((key.length + 3) % 4));
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, c => c.charCodeAt(0)) });
+      const r = await fetch(H + "/patient-subscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ doctor: DOC.id, uid: st.uid, endpoint: sub.endpoint }) });
+      const d = await r.json(); if (!r.ok || !d.token) throw new Error(d.error || "Could not turn on reminders.");
+      const c = await caches.open("patient-reminders"); const m = await c.match("list");
+      const list = (m ? await m.json() : []).filter(x => x.until > Date.now() && x.uid !== st.uid);
+      list.push({ uid: st.uid, t: d.token, until: Date.now() + 40 * 864e5 });
+      await c.put("list", new Response(JSON.stringify(list)));
+      el.innerHTML = `<p class="small remind-note">✓ Reminders are on for this phone.</p>`;
+    } catch (e) { el.innerHTML = `<p class="small remind-note">${esc(e.message || "Could not turn on reminders.")} You'll still get your reminders on WhatsApp.</p>`; }
+  };
 }
 function drawQR() {
   const el = $("#qr", box);

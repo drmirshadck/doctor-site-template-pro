@@ -1,10 +1,10 @@
 /* Service worker: lets the site install as an app and shows the doctor's booking notifications.
    Always loads the latest website from the internet; keeps a copy of the main pages for offline opening. */
-const CACHE = "doc-v2";
+const CACHE = "doc-v3";
 const CORE = ["./", "index.html", "doctor.html", "consult.html", "style.css", "app.js", "config.js", "qrcode.js", "doctor.jpg", "icons/icon-192.png"];
 
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).catch(() => {})); self.skipWaiting(); });
-self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(n => n !== CACHE).map(n => caches.delete(n))))); self.clients.claim(); });
+self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(n => n !== CACHE && n !== "patient-reminders").map(n => caches.delete(n))))); self.clients.claim(); });
 self.addEventListener("fetch", e => {
   const r = e.request;
   if (r.method !== "GET" || new URL(r.url).origin !== location.origin) return;   // booking, payments, video, helper: always live
@@ -26,8 +26,27 @@ async function helperUrl() {
     return m ? m[1] : "";
   } catch (e) { return ""; }
 }
+/* ---------- patient reminders (Pro, opt-in) ---------- */
+async function patientReminder(h) {
+  try {
+    const c = await caches.open("patient-reminders");
+    const m = await c.match("list");
+    if (!m) return null;
+    const list = (await m.json()).filter(x => x.until > Date.now());
+    await c.put("list", new Response(JSON.stringify(list)));
+    for (const x of list) {
+      const r = await fetch(`${h}/patient-msg?uid=${encodeURIComponent(x.uid)}&t=${encodeURIComponent(x.t)}`, { cache: "no-store" });
+      const d = await r.json();
+      if (d && d.title && Date.now() - (d.at || 0) < 10 * 60e3) return d;
+    }
+  } catch (err) {}
+  return null;
+}
 self.addEventListener("push", e => {
   e.waitUntil((async () => {
+    const hp = (await helperUrl()).replace(/\/$/, "");
+    const pr = hp ? await patientReminder(hp) : null;
+    if (pr) return self.registration.showNotification(pr.title, { body: pr.body, icon: "icons/icon-192.png", badge: "icons/icon-192.png", tag: "reminder", renotify: true, data: { url: pr.url } });
     let kind = "request";
     try {
       const h = await helperUrl();
@@ -39,7 +58,7 @@ self.addEventListener("push", e => {
 });
 self.addEventListener("notificationclick", e => {
   e.notification.close();
-  const url = new URL((e.notification.data && e.notification.data.url) || "doctor.html", self.registration.scope).href;
+  const url = new URL((e.notification.data && e.notification.data.url) || "doctor.html", self.registration.scope).href;   // patient reminders open the consultation room
   e.waitUntil(clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
     for (const c of list) if (c.url.startsWith(url)) { c.focus(); return c.navigate(url); }
     return clients.openWindow(url);
