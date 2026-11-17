@@ -1,6 +1,7 @@
 /* DotCom by Arshees — clinic helper (Cloudflare Worker), PRO package.
  *
  * One helper per clinic (one or more doctors). Keeps every key secret and powers doctor.html:
+ *   GET  /book/info, /book/slots, POST /book/create  -> own booking screen on the website (see book.js)
  *   POST /login            {pin}                       -> {token, role, name, doctors}
  *   GET  /bookings         ?doctor=<id>                -> {pending, upcoming, past}
  *   POST /confirm          {uid, doctor}               -> {ok, wa}
@@ -33,6 +34,7 @@
  * KV keeps only: phone push subscriptions (doctors/desk), last event type, PIN-failure counters,
  * and booking ids already reminded (auto-expire).
  */
+import { bookRoute, isBookPath } from "./book.js";
 
 const CAL = "https://api.cal.com/v2";
 const CAL_VERSION = "2024-08-13";
@@ -74,6 +76,7 @@ async function route(req, env, url, fromSite) {
   if (!fromSite) throw err(403, "Not allowed.");
   if (p === "/login" && M === "POST") return login(req, env);
   if (p === "/patient-subscribe" && M === "POST") return patientSubscribe(req, env);
+  if (isBookPath(p)) return bookRoute(req, url, p, async id => { const d = doctors(env).find(x => x.id === id); const key = d ? calKey(env, d.id) : ""; return key ? { key, username: d.calUser || "" } : null; }, env.PUSH);
 
   const role = await requireSession(req, env);
   const q = url.searchParams;
