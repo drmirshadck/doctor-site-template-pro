@@ -4,6 +4,7 @@ name = "dotcom-by-arshees-calendar-test-pro"
 main = "worker.js"
 compatibility_date = "2026-11-01"
 workers_dev = true
+keep_vars = true          # a deploy never removes values added in the Cloudflare dashboard
 
 [triggers]
 crons = ["*/15 * * * *"]   # WhatsApp reminders (24 h + 1 h) and review requests
