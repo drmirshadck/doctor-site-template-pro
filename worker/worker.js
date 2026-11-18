@@ -53,12 +53,12 @@ const TZ = "Asia/Kolkata";
 const enc = new TextEncoder();
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const cors = corsHeaders(req, env);
     if (req.method === "OPTIONS") return new Response(null, { status: cors ? 204 : 403, headers: cors || {} });
     let r;
-    try { r = await route(req, env, url, !!cors); }
+    try { r = await route(req, env, url, !!cors, ctx); }
     catch (e) { r = json({ error: e.publicMessage || "Something went wrong. Please try again." }, e.status || 500); }
     if (cors) for (const [k, v] of Object.entries(cors)) r.headers.set(k, v);
     return r;
@@ -74,7 +74,7 @@ const calKey = (env, id) => secretMap(env, "CAL_KEYS")[id] || "";
 const dailyKey = (env, id) => secretMap(env, "DAILY_KEYS")[id] || "";
 
 /* ---------------- routes ---------------- */
-async function route(req, env, url, fromSite) {
+async function route(req, env, url, fromSite, ctx) {
   const p = url.pathname.replace(/\/+$/, "") || "/";
   const M = req.method;
   if (p === "/health") return json({ ok: true });
@@ -87,13 +87,13 @@ async function route(req, env, url, fromSite) {
   if (!fromSite) throw err(403, "Not allowed.");
   if (p === "/login" && M === "POST") return login(req, env);
   if (p === "/patient-subscribe" && M === "POST") return patientSubscribe(req, env);
-  if (OWN(env) && isOwnPublic(p)) return ownPublic(req, env, url, p, doctors(env), ownHooks(env));
+  if (OWN(env) && isOwnPublic(p)) return ownPublic(req, env, url, p, doctors(env), ownHooks(env, ctx));
   if (!OWN(env) && isBookPath(p)) return bookRoute(req, url, p, async id => { const d = doctors(env).find(x => x.id === id); const key = d ? calKey(env, d.id) : ""; return key ? { key, username: d.calUser || "" } : null; }, env.PUSH);
 
   const role = await requireSession(req, env);
   const q = url.searchParams;
   const canDo = id => { if (role !== "desk" && role !== id) throw err(403, "Not allowed."); return doctorById(env, id); };
-  if (OWN(env)) { const r = await ownRoute(req, env, url, p, role, canDo); if (r) return r; }
+  if (OWN(env)) { const r = await ownRoute(req, env, url, p, role, canDo, ctx); if (r) return r; }
 
   if (p === "/bookings" && M === "GET") {
     const ids = role === "desk" ? (q.get("doctor") && q.get("doctor") !== "all" ? [q.get("doctor")] : doctors(env).map(d => d.id)) : [role];
@@ -188,8 +188,9 @@ async function waStaff(env, d, b) {
 }
 const forget = async (env, uid) => { if (/^[A-Za-z0-9_-]{3,100}$/.test(uid || "")) { await env.PUSH.delete("psub:" + uid); await env.PUSH.delete("pmsg:" + uid); } };
 // website + patient's manage link -> phone alerts, emails, WhatsApp (never break a booking)
-function ownHooks(env) {
+function ownHooks(env, ctx) {
   return {
+    bg: ctx ? p => ctx.waitUntil(p) : null,
     onNew: async (d, b) => {
       const pend = b.status === "pending";
       await alertPhones(env, d, pend ? "request" : "created");
@@ -204,7 +205,7 @@ function ownHooks(env) {
     }
   };
 }
-async function ownRoute(req, env, url, p, role, canDo) {
+async function ownRoute(req, env, url, p, role, canDo, ctx) {
   const M = req.method, q = url.searchParams;
   const ids = () => role === "desk" ? (q.get("doctor") && q.get("doctor") !== "all" ? [q.get("doctor")] : doctors(env).map(d => d.id)) : [role];
   if (p === "/bookings" && M === "GET") {
@@ -221,14 +222,14 @@ async function ownRoute(req, env, url, p, role, canDo) {
   if (p === "/confirm" && M === "POST") {
     const b = await body(req), d = canDo(b.doctor);
     const v = await call(env, d, { op: "confirm", id: uidOk(b.uid) && b.uid });
-    await mailBoth(env, d, { ...v, t: await manageToken(env, d.id, v.uid) }, "confirmed");
+    const m1 = mailBoth(env, d, { ...v, t: await manageToken(env, d.id, v.uid) }, "confirmed"); if (ctx) ctx.waitUntil(m1); else await m1;
     return json({ ok: true, wa: await waSend(env, v.phone, "booking_confirmed", [v.name, d.name, env.CLINIC_NAME, when(v.start), joinLink(env, d)]) });
   }
   if ((p === "/decline" || p === "/cancel-booking") && M === "POST") {
     const b = await body(req), d = canDo(b.doctor), cancel = p === "/cancel-booking";
     const v = await call(env, d, { op: cancel ? "dcancel" : "decline", id: uidOk(b.uid) && b.uid });
     await forget(env, v.uid);
-    await mailBoth(env, d, { ...v, reason: String(b.reason || "").slice(0, 300) }, cancel ? "cancelledByDoctor" : "declined");
+    const m2 = mailBoth(env, d, { ...v, reason: String(b.reason || "").slice(0, 300) }, cancel ? "cancelledByDoctor" : "declined"); if (ctx) ctx.waitUntil(m2); else await m2;
     return json({ ok: true, wa: await waSend(env, v.phone, "booking_declined", [v.name, d.name, env.CLINIC_NAME, when(v.start), "+" + digits(env.CLINIC_WHATSAPP)]) });
   }
   if (p === "/followup" && M === "POST") {
