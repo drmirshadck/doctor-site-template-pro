@@ -20,7 +20,7 @@ WA_ENABLED = "1"
 WA_LANG = "en"
 WA_PHONE_ID = "1442684148932294"        # DotCom WhatsApp sender (Meta test number for now)
 # OWN CALENDAR (no Cal.com): "own". Leave out or "cal" = Cal.com as before.
-CALENDAR = "own"
+CALENDAR = "cal"            # TEMPLATE DEMO helper only. For EVERY client site set CALENDAR = "own" (DotCom's own calendar).
 TIMEZONE = "Asia/Kolkata"
 RETAIN_DAYS = "365"          # bookings are deleted this many days after the appointment
 CHANGE_CUTOFF_HOURS = "2"    # patients can cancel / change time online until this many hours before
