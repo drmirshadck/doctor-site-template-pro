@@ -43,7 +43,9 @@
  */
 import { bookRoute, isBookPath } from "./book.js";
 import { isOwnPublic, ownPublic, ownDoctor, call } from "./own.js";
-import { emailPatient, emailDoctor, manageToken } from "./mail.js";
+import { emailPatient, emailDoctor, manageToken, roomLink } from "./mail.js";
+import { isVideoPath, videoRoute } from "./video.js";
+export { Room } from "./video.js";        // OWN VIDEO (Durable Object, one per consultation)
 export { Calendar } from "./calendar.js";   // OWN CALENDAR (Durable Object, one per doctor)
 const OWN = env => env.CALENDAR === "own";
 
@@ -57,6 +59,8 @@ export default {
     const url = new URL(req.url);
     const cors = corsHeaders(req, env);
     if (req.method === "OPTIONS") return new Response(null, { status: cors ? 204 : 403, headers: cors || {} });
+    // video room WebSocket: answered as it is (no extra headers on a 101 response)
+    if (url.pathname === "/video/ws") { try { return await videoRoute(req, env, url, "/video/ws", videoOpts(env)); } catch (e) { return json({ error: e.publicMessage || "Something went wrong." }, e.status || 500); } }
     let r;
     try { r = await route(req, env, url, !!cors, ctx); }
     catch (e) { r = json({ error: e.publicMessage || "Something went wrong. Please try again." }, e.status || 500); }
@@ -87,6 +91,7 @@ async function route(req, env, url, fromSite, ctx) {
   if (!fromSite) throw err(403, "Not allowed.");
   if (p === "/login" && M === "POST") return login(req, env);
   if (p === "/patient-subscribe" && M === "POST") return patientSubscribe(req, env);
+  if (OWN(env) && isVideoPath(p)) return videoRoute(req, env, url, p, videoOpts(env, ctx));
   if (OWN(env) && isOwnPublic(p)) return ownPublic(req, env, url, p, doctors(env), ownHooks(env, ctx));
   if (!OWN(env) && isBookPath(p)) return bookRoute(req, url, p, async id => { const d = doctors(env).find(x => x.id === id); const key = d ? calKey(env, d.id) : ""; return key ? { key, username: d.calUser || "" } : null; }, env.PUSH);
 
@@ -197,7 +202,7 @@ function ownHooks(env, ctx) {
       await mailBoth(env, d, b, pend ? "received" : "booked", pend ? "request" : "booked");
       await waStaff(env, d, { ...b, title: b.title || "Consultation" });
       if (pend) await waSend(env, b.phone, "booking_received", [b.name, d.name, env.CLINIC_NAME, when(b.start), "+" + digits(env.CLINIC_WHATSAPP)]);
-      else await waSend(env, b.phone, "booking_confirmed", [b.name, d.name, env.CLINIC_NAME, when(b.start), joinLink(env, d)]);
+      else await waSend(env, b.phone, "booking_confirmed", [b.name, d.name, env.CLINIC_NAME, when(b.start), await ownJoin(env, d, b)]);
     },
     onChange: async (d, b, what) => {
       if (what === "cancelled by patient") { await forget(env, b.uid); await alertPhones(env, d, "cancelled"); return mailBoth(env, d, b, "cancelledByPatient"); }
@@ -213,7 +218,8 @@ async function ownRoute(req, env, url, p, role, canDo, ctx) {
     await Promise.all(ids().map(async id => {
       const d = canDo(id), r = await call(env, d, { op: "list" });
       out.emails = r.emails;
-      out.pending.push(...r.pending.map(v => slimOwn(v, d))); out.upcoming.push(...r.upcoming.map(v => slimOwn(v, d))); out.past.push(...(r.past || []).map(v => slimOwn(v, d)));
+      const withT = async v => ({ ...slimOwn(v, d), t: await manageToken(env, d.id, v.uid) });   // signed room link for "Send link"
+      out.pending.push(...await Promise.all(r.pending.map(withT))); out.upcoming.push(...await Promise.all(r.upcoming.map(withT))); out.past.push(...(r.past || []).map(v => slimOwn(v, d)));
     }));
     const asc = (a, b) => new Date(a.start) - new Date(b.start);
     out.pending.sort(asc); out.upcoming.sort(asc); out.past.sort((a, b) => -asc(a, b));
@@ -223,7 +229,7 @@ async function ownRoute(req, env, url, p, role, canDo, ctx) {
     const b = await body(req), d = canDo(b.doctor);
     const v = await call(env, d, { op: "confirm", id: uidOk(b.uid) && b.uid });
     const m1 = mailBoth(env, d, { ...v, t: await manageToken(env, d.id, v.uid) }, "confirmed"); if (ctx) ctx.waitUntil(m1); else await m1;
-    return json({ ok: true, wa: await waSend(env, v.phone, "booking_confirmed", [v.name, d.name, env.CLINIC_NAME, when(v.start), joinLink(env, d)]) });
+    return json({ ok: true, wa: await waSend(env, v.phone, "booking_confirmed", [v.name, d.name, env.CLINIC_NAME, when(v.start), await ownJoin(env, d, v)]) });
   }
   if ((p === "/decline" || p === "/cancel-booking") && M === "POST") {
     const b = await body(req), d = canDo(b.doctor), cancel = p === "/cancel-booking";
@@ -405,6 +411,21 @@ const when = iso => new Date(iso).toLocaleString("en-IN", { timeZone: TZ, weekda
 const timeOnly = iso => new Date(iso).toLocaleTimeString("en-IN", { timeZone: TZ, hour: "numeric", minute: "2-digit" });
 const site = env => String(env.SITE_URL || "").replace(/\/$/, "");
 const joinLink = (env, d) => `${site(env)}/consult.html?d=${encodeURIComponent(d.id)}`;
+// own calendar: the booking's own video room (signed link, same as the patient's change/cancel link)
+const ownJoin = async (env, d, b) => (b && b.uid) ? roomLink(env, d, { uid: b.uid, t: await manageToken(env, d.id, b.uid) }) : joinLink(env, d);
+function videoOpts(env, ctx) {
+  return {
+    doctors: doctors(env), json, err,
+    whoAmI: async r => await requireSession(r, env),         // a doctor's own PIN (the front desk can't join calls)
+    onWaiting: async d => {
+      const k = "wait:" + d.id;
+      if (await env.PUSH.get(k)) return;                      // at most one alert every 2 minutes
+      await env.PUSH.put(k, "1", { expirationTtl: 120 });
+      const p = alertPhones(env, d, "waiting");               // doctor + front desk devices
+      if (ctx) ctx.waitUntil(p); else await p;
+    }
+  };
+}
 const bookLink = (env, d) => `${site(env)}/?doctor=${encodeURIComponent(d.id)}#book`;
 
 /* ---------------- Cal.com webhook -> app + WhatsApp alerts ---------------- */
@@ -482,13 +503,13 @@ async function ownReminders(env, d, now) {
       const booked = new Date(v.created).getTime();
       if (diff <= 24 * 3600e3 && diff > 2 * 3600e3 && b.start && new Date(b.start).getTime() - booked > 26 * 3600e3 && !(await env.PUSH.get("r24:" + b.uid))) {
         await env.PUSH.put("r24:" + b.uid, "1", { expirationTtl: 2 * 86400 });
-        await waSend(env, b.phone, "reminder_24h", [b.name, d.name, when(b.start), joinLink(env, d)]);
-        await pushPatient(env, b.uid, { title: "Consultation tomorrow", body: `Your consultation with ${d.name} is on ${when(b.start)} (IST). Tap to open the consultation room.`, url: joinLink(env, d) });
+        await waSend(env, b.phone, "reminder_24h", [b.name, d.name, when(b.start), await ownJoin(env, d, b)]);
+        await pushPatient(env, b.uid, { title: "Consultation tomorrow", body: `Your consultation with ${d.name} is on ${when(b.start)} (IST). Tap to open the consultation room.`, url: await ownJoin(env, d, b) });
       }
       if (diff <= 70 * 60e3 && !(await env.PUSH.get("r1:" + b.uid))) {
         await env.PUSH.put("r1:" + b.uid, "1", { expirationTtl: 2 * 86400 });
-        await waSend(env, b.phone, "reminder_1h", [b.name, d.name, timeOnly(b.start), joinLink(env, d)]);
-        await pushPatient(env, b.uid, { title: "Consultation in about an hour", body: `Your consultation with ${d.name} starts at ${timeOnly(b.start)} (IST). Tap to join.`, url: joinLink(env, d) });
+        await waSend(env, b.phone, "reminder_1h", [b.name, d.name, timeOnly(b.start), await ownJoin(env, d, b)]);
+        await pushPatient(env, b.uid, { title: "Consultation in about an hour", body: `Your consultation with ${d.name} starts at ${timeOnly(b.start)} (IST). Tap to join.`, url: await ownJoin(env, d, b) });
       }
     } else if (env.REVIEW_URL) {
       const ended = now - new Date(b.end).getTime();
