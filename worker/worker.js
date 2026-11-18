@@ -30,11 +30,22 @@
  *   CAL_WEBHOOK_SECRET, VAPID_PUBLIC_KEY, VAPID_PRIVATE_JWK, WA_TOKEN
  * KV binding: PUSH
  *
- * No patient data is stored. Bookings are read live from Cal.com; WhatsApp messages are passed straight to Meta.
+ * CALENDAR (var) = "own": DotCom's own calendar (calendar.js, own.js, mail.js) instead of Cal.com — no accounts
+ *   for the doctors. Bookings in a Durable Object per doctor, patient details encrypted (secret DATA_KEY), deleted
+ *   RETAIN_DAYS after the appointment. Notifications: phone alerts (doctor + desk), emails (patient + doctor, ZeptoMail)
+ *   and WhatsApp (patient, doctor, desk). Extra routes: GET/POST /schedule, GET /export (CSV), POST /cancel-booking,
+ *   /book/manage, /book/cancel, /book/reschedule (patient's signed link). Email reminders come from the calendar
+ *   itself; WhatsApp + app reminders and review requests from the cron, reading the calendar.
+ *
+ * Cal.com mode: no patient data is stored. Bookings are read live from Cal.com; WhatsApp messages are passed straight to Meta.
  * KV keeps only: phone push subscriptions (doctors/desk), last event type, PIN-failure counters,
  * and booking ids already reminded (auto-expire).
  */
 import { bookRoute, isBookPath } from "./book.js";
+import { isOwnPublic, ownPublic, ownDoctor, call } from "./own.js";
+import { emailPatient, emailDoctor, manageToken } from "./mail.js";
+export { Calendar } from "./calendar.js";   // OWN CALENDAR (Durable Object, one per doctor)
+const OWN = env => env.CALENDAR === "own";
 
 const CAL = "https://api.cal.com/v2";
 const CAL_VERSION = "2024-08-13";
@@ -76,11 +87,13 @@ async function route(req, env, url, fromSite) {
   if (!fromSite) throw err(403, "Not allowed.");
   if (p === "/login" && M === "POST") return login(req, env);
   if (p === "/patient-subscribe" && M === "POST") return patientSubscribe(req, env);
-  if (isBookPath(p)) return bookRoute(req, url, p, async id => { const d = doctors(env).find(x => x.id === id); const key = d ? calKey(env, d.id) : ""; return key ? { key, username: d.calUser || "" } : null; }, env.PUSH);
+  if (OWN(env) && isOwnPublic(p)) return ownPublic(req, env, url, p, doctors(env), ownHooks(env));
+  if (!OWN(env) && isBookPath(p)) return bookRoute(req, url, p, async id => { const d = doctors(env).find(x => x.id === id); const key = d ? calKey(env, d.id) : ""; return key ? { key, username: d.calUser || "" } : null; }, env.PUSH);
 
   const role = await requireSession(req, env);
   const q = url.searchParams;
   const canDo = id => { if (role !== "desk" && role !== id) throw err(403, "Not allowed."); return doctorById(env, id); };
+  if (OWN(env)) { const r = await ownRoute(req, env, url, p, role, canDo); if (r) return r; }
 
   if (p === "/bookings" && M === "GET") {
     const ids = role === "desk" ? (q.get("doctor") && q.get("doctor") !== "all" ? [q.get("doctor")] : doctors(env).map(d => d.id)) : [role];
@@ -147,6 +160,115 @@ async function route(req, env, url, fromSite) {
     return json({ ok: true });
   }
   throw err(404, "Not found.");
+}
+
+/* ---------------- own calendar (CALENDAR = "own") ---------------- */
+// same shape the dashboard already uses for Cal.com bookings
+function slimOwn(v, d) {
+  return { uid: v.uid, doctor: d.id, doctorName: d.name, status: v.status === "confirmed" ? "accepted" : v.status, slug: v.slug, title: v.title,
+    start: v.start, end: v.end, name: v.name, email: v.email, phone: v.phone, absent: !!v.absent,
+    notes: ((v.utr ? `UPI ref: ${v.utr} ` : "") + (v.notes || "")).trim().slice(0, 500) };
+}
+const ownGet = async (env, d, uid) => slimOwn(await call(env, d, { op: "get", id: uidOk(uid) && uid }), d);
+const many = env => doctors(env).length > 1;
+async function mailBoth(env, d, b, kind, dkind) {
+  const log = k => e => console.log("email failed", k, String(e && e.message || e));
+  await emailPatient(env, d, b, kind, many(env)).catch(log(kind));
+  await emailDoctor(env, d, b, dkind || kind, many(env)).catch(log("doctor " + (dkind || kind)));
+}
+async function alertPhones(env, d, type) {
+  await env.PUSH.put("lastEvent", JSON.stringify({ type, doctor: d.id, at: Date.now() }));
+  return (await pushAll(env, "subs:" + d.id)) + (await pushAll(env, "subs:desk"));
+}
+async function waStaff(env, d, b) {
+  const msg = [d.name, b.name, b.title, when(b.start)], out = [];
+  if (d.whatsapp) out.push(await waSend(env, d.whatsapp, "doctor_new_booking", msg));
+  if (env.DESK_WHATSAPP && digits(env.DESK_WHATSAPP) !== digits(d.whatsapp)) out.push(await waSend(env, env.DESK_WHATSAPP, "doctor_new_booking", msg));
+  return out;
+}
+const forget = async (env, uid) => { if (/^[A-Za-z0-9_-]{3,100}$/.test(uid || "")) { await env.PUSH.delete("psub:" + uid); await env.PUSH.delete("pmsg:" + uid); } };
+// website + patient's manage link -> phone alerts, emails, WhatsApp (never break a booking)
+function ownHooks(env) {
+  return {
+    onNew: async (d, b) => {
+      const pend = b.status === "pending";
+      await alertPhones(env, d, pend ? "request" : "created");
+      await mailBoth(env, d, b, pend ? "received" : "booked", pend ? "request" : "booked");
+      await waStaff(env, d, { ...b, title: b.title || "Consultation" });
+      if (pend) await waSend(env, b.phone, "booking_received", [b.name, d.name, env.CLINIC_NAME, when(b.start), "+" + digits(env.CLINIC_WHATSAPP)]);
+      else await waSend(env, b.phone, "booking_confirmed", [b.name, d.name, env.CLINIC_NAME, when(b.start), joinLink(env, d)]);
+    },
+    onChange: async (d, b, what) => {
+      if (what === "cancelled by patient") { await forget(env, b.uid); await alertPhones(env, d, "cancelled"); return mailBoth(env, d, b, "cancelledByPatient"); }
+      if (what === "time changed by patient") { await env.PUSH.delete("r24:" + b.uid); await env.PUSH.delete("r1:" + b.uid); await alertPhones(env, d, "rescheduled"); return mailBoth(env, d, b, "rescheduled"); }
+    }
+  };
+}
+async function ownRoute(req, env, url, p, role, canDo) {
+  const M = req.method, q = url.searchParams;
+  const ids = () => role === "desk" ? (q.get("doctor") && q.get("doctor") !== "all" ? [q.get("doctor")] : doctors(env).map(d => d.id)) : [role];
+  if (p === "/bookings" && M === "GET") {
+    const out = { pending: [], upcoming: [], past: [], own: true };
+    await Promise.all(ids().map(async id => {
+      const d = canDo(id), r = await call(env, d, { op: "list" });
+      out.emails = r.emails;
+      out.pending.push(...r.pending.map(v => slimOwn(v, d))); out.upcoming.push(...r.upcoming.map(v => slimOwn(v, d))); out.past.push(...(r.past || []).map(v => slimOwn(v, d)));
+    }));
+    const asc = (a, b) => new Date(a.start) - new Date(b.start);
+    out.pending.sort(asc); out.upcoming.sort(asc); out.past.sort((a, b) => -asc(a, b));
+    return json(out);
+  }
+  if (p === "/confirm" && M === "POST") {
+    const b = await body(req), d = canDo(b.doctor);
+    const v = await call(env, d, { op: "confirm", id: uidOk(b.uid) && b.uid });
+    await mailBoth(env, d, { ...v, t: await manageToken(env, d.id, v.uid) }, "confirmed");
+    return json({ ok: true, wa: await waSend(env, v.phone, "booking_confirmed", [v.name, d.name, env.CLINIC_NAME, when(v.start), joinLink(env, d)]) });
+  }
+  if ((p === "/decline" || p === "/cancel-booking") && M === "POST") {
+    const b = await body(req), d = canDo(b.doctor), cancel = p === "/cancel-booking";
+    const v = await call(env, d, { op: cancel ? "dcancel" : "decline", id: uidOk(b.uid) && b.uid });
+    await forget(env, v.uid);
+    await mailBoth(env, d, { ...v, reason: String(b.reason || "").slice(0, 300) }, cancel ? "cancelledByDoctor" : "declined");
+    return json({ ok: true, wa: await waSend(env, v.phone, "booking_declined", [v.name, d.name, env.CLINIC_NAME, when(v.start), "+" + digits(env.CLINIC_WHATSAPP)]) });
+  }
+  if (p === "/followup" && M === "POST") {
+    const b = await body(req), d = canDo(b.doctor);
+    const weeks = Math.min(52, Math.max(1, parseInt(b.weeks, 10) || 2));
+    const bk = await ownGet(env, d, b.uid);
+    const due = new Date(Date.now() + weeks * 7 * 864e5).toLocaleDateString("en-IN", { timeZone: TZ, day: "numeric", month: "short" });
+    return json({ ok: true, wa: await waPatient(env, bk, "followup_reminder", [bk.name, d.name, due, bookLink(env, d)]) });
+  }
+  if (p === "/noshow" && M === "POST") { const b = await body(req), d = canDo(b.doctor); await call(env, d, { op: "noshow", id: uidOk(b.uid) && b.uid }); return json({ ok: true }); }
+  if (p === "/report" && M === "GET") {
+    const month = /^\d{4}-\d{2}$/.test(q.get("month") || "") ? q.get("month") : new Date().toISOString().slice(0, 7);
+    return json(await report(env, ids().map(id => canDo(id)), month));
+  }
+  // timetable, leave and CSV: the doctor (or the desk for a chosen doctor)
+  if (["/schedule", "/export"].includes(p)) {
+    let id = q.get("doctor") || role;
+    if (p === "/schedule" && M === "POST") { const b = await req.clone().json().catch(() => ({})); id = b.doctor || id; }
+    if (id === "desk") id = doctors(env)[0] && doctors(env)[0].id;
+    return ownDoctor(req, env, url, p, canDo(id), {});
+  }
+  if (p === "/leave" || p === "/leave-delete") {
+    const b = M === "POST" ? await body(req) : {};
+    const d = canDo(b.doctor || q.get("doctor") || role);
+    const s = (await call(env, d, { op: "schedule" })).schedule;
+    const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+    if (M === "GET") return json({ items: (s.leave || []).filter(l => (l.to || l.from) >= today).map(l => ({ id: l.from + "_" + (l.to || l.from), start: istDayStart(l.from), end: istDayEnd(l.to || l.from) })) });
+    let leave = s.leave || [];
+    if (p === "/leave") {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(b.start || "") || !/^\d{4}-\d{2}-\d{2}$/.test(b.end || "") || b.end < b.start) throw err(400, "Choose a start and end date.");
+      leave = leave.concat({ from: b.start, to: b.end, note: "Leave" });
+    } else leave = leave.filter(l => l.from + "_" + (l.to || l.from) !== String(b.id));
+    await call(env, d, { op: "setSchedule", schedule: { leave } });
+    return json({ ok: true });
+  }
+  return null;   // /host-token, /subscribe: shared with Cal.com mode
+}
+async function ownReport(env, d, month) {
+  const r = await call(env, d, { op: "export", month });
+  return r.rows.map(v => slimOwn({ ...v, status: { confirmed: "confirmed", declined: "rejected" }[v.status] || v.status }, d));
 }
 
 /* ---------------- auth ---------------- */
@@ -315,6 +437,7 @@ async function calWebhook(req, env, docId) {
 async function runReminders(env) {
   const now = Date.now();
   for (const d of doctors(env)) {
+    if (OWN(env)) { try { await ownReminders(env, d, now); } catch (e) { console.log("reminders failed", d.id, String(e && e.message || e)); } continue; }
     if (!calKey(env, d.id)) continue;
     try {
       const up = await cal(env, d.id, "/bookings?status=upcoming&sortStart=asc&take=100");
@@ -348,6 +471,33 @@ async function runReminders(env) {
   }
 }
 
+/* own calendar: WhatsApp + app reminders and review requests (emails come from the calendar's own alarm) */
+async function ownReminders(env, d, now) {
+  const { rows } = await call(env, d, { op: "window", from: now - 6 * 3600e3, to: now + 25 * 3600e3 });
+  for (const v of rows) {
+    const b = slimOwn(v, d);
+    const diff = new Date(b.start).getTime() - now;
+    if (diff > 0) {
+      const booked = new Date(v.created).getTime();
+      if (diff <= 24 * 3600e3 && diff > 2 * 3600e3 && b.start && new Date(b.start).getTime() - booked > 26 * 3600e3 && !(await env.PUSH.get("r24:" + b.uid))) {
+        await env.PUSH.put("r24:" + b.uid, "1", { expirationTtl: 2 * 86400 });
+        await waSend(env, b.phone, "reminder_24h", [b.name, d.name, when(b.start), joinLink(env, d)]);
+        await pushPatient(env, b.uid, { title: "Consultation tomorrow", body: `Your consultation with ${d.name} is on ${when(b.start)} (IST). Tap to open the consultation room.`, url: joinLink(env, d) });
+      }
+      if (diff <= 70 * 60e3 && !(await env.PUSH.get("r1:" + b.uid))) {
+        await env.PUSH.put("r1:" + b.uid, "1", { expirationTtl: 2 * 86400 });
+        await waSend(env, b.phone, "reminder_1h", [b.name, d.name, timeOnly(b.start), joinLink(env, d)]);
+        await pushPatient(env, b.uid, { title: "Consultation in about an hour", body: `Your consultation with ${d.name} starts at ${timeOnly(b.start)} (IST). Tap to join.`, url: joinLink(env, d) });
+      }
+    } else if (env.REVIEW_URL) {
+      const ended = now - new Date(b.end).getTime();
+      if (b.absent || ended < 30 * 60e3 || ended > 6 * 3600e3 || (await env.PUSH.get("rv:" + b.uid))) continue;
+      await env.PUSH.put("rv:" + b.uid, "1", { expirationTtl: 7 * 86400 });
+      await waSend(env, b.phone, "review_request", [b.name, d.name, env.REVIEW_URL]);
+    }
+  }
+}
+
 /* ---------------- monthly report ---------------- */
 async function report(env, docs, month) {
   const [y, m] = month.split("-").map(Number);
@@ -359,11 +509,12 @@ async function report(env, docs, month) {
   const now = Date.now();
   for (const d of docs) {
     const r = blank(); let skip = 0;
+    const ownRows = OWN(env) ? await ownReport(env, d, month) : null;
     for (let page = 0; page < 10; page++) {
-      const x = await cal(env, d.id, `/bookings?afterStart=${encodeURIComponent(from)}&beforeEnd=${encodeURIComponent(to)}&take=100&skip=${skip}&sortStart=asc`);
+      const x = ownRows ? { data: ownRows, own: true } : await cal(env, d.id, `/bookings?afterStart=${encodeURIComponent(from)}&beforeEnd=${encodeURIComponent(to)}&take=100&skip=${skip}&sortStart=asc`);
       const list = Array.isArray(x.data) ? x.data : [];
       for (const raw of list) {
-        const b = slim(raw, d); const t = (d.types || {})[b.slug] || {};
+        const b = ownRows ? raw : slim(raw, d); const t = (d.types || {})[b.slug] || {};
         const add = (o) => {
           if (b.status === "cancelled") o.cancelled++;
           else if (b.status === "rejected") o.declined++;
@@ -379,7 +530,7 @@ async function report(env, docs, month) {
         };
         add(r); add(total);
       }
-      if (list.length < 100) break; skip += 100;
+      if (ownRows || list.length < 100) break; skip += 100;
     }
     per.push({ id: d.id, name: d.name, ...r });
   }
@@ -392,14 +543,14 @@ const PUSH_HOSTS = /^(fcm\.googleapis\.com|updates\.push\.services\.mozilla\.com
 async function patientSubscribe(req, env) {
   const { doctor, uid, endpoint } = await body(req);
   const d = doctors(env).find(x => x.id === doctor);
-  if (!d || !calKey(env, d.id)) throw err(400, "Unknown doctor.");
+  if (!d || (!OWN(env) && !calKey(env, d.id))) throw err(400, "Unknown doctor.");
   uidOk(uid);
   let host = ""; try { const u = new URL(String(endpoint || "")); if (u.protocol === "https:") host = u.hostname; } catch (e) {}
   if (!PUSH_HOSTS.test(host)) throw err(400, "This browser can't receive reminders.");
-  let bk; try { const r = await cal(env, d.id, `/bookings/${encodeURIComponent(uid)}`); bk = r.data || r; } catch (e) { throw err(404, "Booking not found."); }
+  let bk; try { if (OWN(env)) bk = await call(env, d, { op: "get", id: uid }); else { const r = await cal(env, d.id, `/bookings/${encodeURIComponent(uid)}`); bk = r.data || r; } } catch (e) { throw err(404, "Booking not found."); }
   const status = String(bk.status || "").toLowerCase();
   const end = new Date(bk.end || bk.endTime || bk.start || bk.startTime || 0).getTime();
-  if (!["accepted", "pending", "unconfirmed"].includes(status) || !(end > Date.now())) throw err(400, "This booking can't get reminders.");
+  if (!["accepted", "confirmed", "pending", "unconfirmed"].includes(status) || !(end > Date.now())) throw err(400, "This booking can't get reminders.");
   const token = b64url(crypto.getRandomValues(new Uint8Array(18)));
   const ttl = Math.max(60, Math.round((end - Date.now()) / 1000) + 3600);
   await env.PUSH.put("psub:" + uid, JSON.stringify({ e: endpoint, d: d.id, t: token }), { expirationTtl: ttl });

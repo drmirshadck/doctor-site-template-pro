@@ -67,6 +67,23 @@
   dialog::backdrop{background:rgba(0,0,0,.4)}
   dialog h3{font:700 19px Outfit;color:var(--deep);margin-bottom:8px}
   dialog textarea{width:100%;min-height:80px;border:1.5px solid var(--line);border-radius:12px;padding:10px;margin:10px 0}
+  .tt h3{font:700 16px Outfit,system-ui,sans-serif;color:var(--deep);margin:4px 0 10px}
+  .dayrow{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;align-items:start;padding:10px 0;border-top:1px solid var(--line)}
+  .dayrow:first-of-type{border-top:0}
+  .dayrow b{font-size:14px}
+  .wins{display:grid;gap:6px}
+  .win{display:flex;gap:6px;align-items:center;flex-wrap:nowrap}
+  .win input[type=time]{flex:1 1 0;min-width:0;width:auto;font-size:14px;padding:7px 4px}
+  .win span{flex:none;font-size:13px;color:var(--muted)}
+  .win .x{flex:none}
+  .win input[type=time],.tt input[type=date],.tt input[type=number],.tt input[type=text]{font:inherit;border:1.5px solid var(--line);border-radius:10px;padding:7px 8px;background:#fff}
+  .tt input[type=number]{width:80px}
+  .x{border:0;background:#fdeceb;color:#b3261e;border-radius:10px;padding:7px 10px;font-weight:700}
+  .add{border:1.5px dashed var(--line);background:#fff;color:var(--deep);border-radius:10px;padding:6px 10px;font-weight:700;justify-self:start}
+  .closed{color:var(--muted);font-size:14px;padding-top:8px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .grid2 label{font-size:13.5px;color:var(--muted);display:grid;gap:4px}
+  .leave{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-top:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -167,8 +184,9 @@ function render() {
   if (tab === "upcoming") body = U.length ? U.map(card).join("") : `<div class="empty">No upcoming consultations.</div>`;
   if (tab === "past") body = D.length ? D.map(card).join("") : `<div class="empty">No consultations in the last 7 days.</div>`;
   if (tab === "leave") body = leaveView();
+  if (tab === "timetable") body = `${isDesk() ? `<div class="row" style="margin-bottom:10px"><label>Doctor<select id="ttDoc">${sess.doctors.map(x => `<option value="${esc(x.id)}" ${ttDoc() === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label></div>` : ""}<div id="tt" class="tt"><div class="empty">Loading timetable…</div></div>`;
   if (tab === "report") body = reportView();
-  $("main").innerHTML = `${notifyBox}${chips}<div class="tabs" role="tablist">${T("pending", "Requests", P.length)}${T("upcoming", "Upcoming", U.length)}${T("past", "Done", 0)}${T("leave", "Leave", 0)}${T("report", "Report", 0)}</div>${body}
+  $("main").innerHTML = `${notifyBox}${chips}<div class="tabs" role="tablist">${T("pending", "Requests", P.length)}${T("upcoming", "Upcoming", U.length)}${T("past", "Done", 0)}${data.own ? T("timetable", "Timetable", 0) : T("leave", "Leave", 0)}${T("report", "Report", 0)}</div>${body}
     <p class="note" style="text-align:center;margin-top:10px">Times are in India time (IST).</p>`;
   document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { tab = b.dataset.t; render(); if (tab === "leave") loadLeave(); });
   document.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { filter = b.dataset.f; render(); });
@@ -179,6 +197,8 @@ function render() {
   document.querySelectorAll("[data-ns]").forEach(b => b.onclick = () => noShowB(b));
   if ($("nb")) $("nb").onclick = enablePush;
   if (tab === "leave") wireLeave();
+  if (tab === "timetable") { if ($("ttDoc")) $("ttDoc").onchange = e => { tt.doc = e.target.value; tt.s = null; loadTT(); }; loadTT(); }
+  document.querySelectorAll("[data-cx]").forEach(b => b.onclick = () => declineB(b.dataset.cx, b.dataset.doc, true));
   if (tab === "report") wireReport();
 }
 function card(b) {
@@ -188,7 +208,7 @@ function card(b) {
   const acts = tab === "pending"
     ? `<button class="btn no" data-no="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Decline</button><button class="btn ok" data-ok="${esc(b.uid)}" data-doc="${esc(b.doctor)}" data-name="${esc(b.name)}">Confirm</button>`
     : tab === "upcoming"
-      ? `${ph ? `<a class="btn wa" href="${waUrl(ph, msg)}" target="_blank" rel="noopener">Send link</a>` : ""}${!isDesk() || true ? `<button class="btn" data-call="${esc(b.doctor)}">Start call</button>` : ""}`
+      ? `${ph ? `<a class="btn wa" href="${waUrl(ph, msg)}" target="_blank" rel="noopener">Send link</a>` : ""}${!isDesk() || true ? `<button class="btn" data-call="${esc(b.doctor)}">Start call</button>` : ""}${data.own ? `<button class="btn no" data-cx="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Cancel</button>` : ""}`
       : `<button class="btn ghost" data-ns="${esc(b.uid)}" data-doc="${esc(b.doctor)}" ${b.absent ? "disabled" : ""}>${b.absent ? "Marked no-show" : "Patient didn't join"}</button><button class="btn" data-fu="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Follow-up</button>`;
   return `<div class="card${tab === "upcoming" && isToday(b.start) ? " today" : ""}">
     <div class="top"><div><h3>${esc(b.name)}</h3><div class="meta"><span>${esc(b.title)}</span>${isDesk() ? `<span><span class="tag doc">${esc(b.doctorName)}</span></span>` : ""}</div></div>
@@ -206,12 +226,12 @@ async function confirmB(btn) {
   catch (e) { toast(e.message); btn.disabled = false; }
 }
 function dialog(html, wire) { const d = $("dlg"); d.innerHTML = html; d.showModal(); wire(d); }
-function declineB(uid, doc) {
-  dialog(`<h3>Decline this booking?</h3><p class="note">The patient gets an email and a WhatsApp. If they already paid, refund them by UPI.</p><textarea id="reason">The doctor is not available at this time. Please book another slot.</textarea><div class="acts"><button class="btn ghost" id="dNo">Keep it</button><button class="btn no" id="dYes">Decline</button></div>`, d => {
+function declineB(uid, doc, cancel) {
+  dialog(`<h3>${cancel ? "Cancel this consultation?" : "Decline this booking?"}</h3><p class="note">The patient gets an email and a WhatsApp. If they already paid, refund them by UPI.</p><textarea id="reason">The doctor is not available at this time. Please book another slot.</textarea><div class="acts"><button class="btn ghost" id="dNo">Keep it</button><button class="btn no" id="dYes">${cancel ? "Cancel consultation" : "Decline"}</button></div>`, d => {
     $("dNo").onclick = () => d.close();
     $("dYes").onclick = async () => {
       $("dYes").disabled = true;
-      try { const x = await post("/decline", { uid, doctor: doc, reason: $("reason").value }); d.close(); reportWa("Declined.", x.wa); await load(); }
+      try { const x = await post(cancel ? "/cancel-booking" : "/decline", { uid, doctor: doc, reason: $("reason").value }); d.close(); reportWa(cancel ? "Cancelled." : "Declined.", x.wa); await load(); }
       catch (e) { toast(e.message); $("dYes").disabled = false; }
     };
   });
@@ -239,7 +259,77 @@ async function openRoom(docId) {
   catch (e) { $("main").innerHTML = `<div class="empty">${esc(e.message)}<br><br><button class="btn" onclick="location.href='doctor.html'">Back</button></div>`; }
 }
 
-/* ---------- leave / holiday ---------- */
+/* ---------- timetable (own calendar) ---------- */
+const DAYS = [["1","Mon"],["2","Tue"],["3","Wed"],["4","Thu"],["5","Fri"],["6","Sat"],["0","Sun"]];
+const tt = { doc: "", s: null };
+const ttDoc = () => isDesk() ? (tt.doc || (filter !== "all" ? filter : sess.doctors[0].id)) : sess.role;
+async function loadTT() {
+  try { if (!tt.s) tt.s = (await api("/schedule?doctor=" + encodeURIComponent(ttDoc()))).schedule; if ($("tt")) drawTT(); }
+  catch (e) { $("tt").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+function drawTT() {
+  const s = tt.s, wk = s.week || {};
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
+  const docName = (sess.doctors.find(x => x.id === ttDoc()) || {}).name || "";
+  const leave = (s.leave || []).filter(l => (l.to || l.from) >= today);
+  const thisMonth = today.slice(0, 7), lastMonth = (() => { const d = new Date(today + "T12:00:00Z"); d.setUTCMonth(d.getUTCMonth() - 1); return d.toISOString().slice(0, 7); })();
+  $("tt").innerHTML = `
+    <div class="card"><h3>Working hours</h3>
+      ${DAYS.map(([k, n]) => `<div class="dayrow"><b>${n}</b><div class="wins">
+        ${(wk[k] || []).map((w, i) => `<div class="win"><input type="time" value="${w[0]}" data-d="${k}" data-i="${i}" data-e="0" aria-label="${n} from"><span>to</span><input type="time" value="${w[1]}" data-d="${k}" data-i="${i}" data-e="1" aria-label="${n} until"><button class="x" data-del="${k}:${i}" aria-label="Remove">✕</button></div>`).join("") || `<span class="closed">Closed</span>`}
+        <button class="add" data-add="${k}">+ Add hours</button></div></div>`).join("")}
+    </div>
+    <div class="card"><h3>Booking rules</h3><div class="grid2">
+      <label>Gap between patients (min)<input type="number" min="0" max="120" id="gap" value="${s.gap ?? 10}"></label>
+      <label>Earliest booking (hours from now)<input type="number" min="0" max="168" id="notice" value="${s.notice ?? 3}"></label>
+      <label>Book up to (days ahead)<input type="number" min="1" max="180" id="ahead" value="${s.ahead ?? 30}"></label>
+      <label>Max patients a day (0 = no limit)<input type="number" min="0" max="200" id="maxPerDay" value="${s.maxPerDay ?? 0}"></label>
+    </div></div>
+    <div class="card"><h3>Leave / days off</h3>
+      ${leave.length ? leave.map(l => `<div class="leave"><span><b>${esc(l.from === l.to ? fmtD(l.from) : fmtD(l.from) + " – " + fmtD(l.to))}</b>${l.note ? " · " + esc(l.note) : ""}</span><button class="x" data-lv="${esc(l.from)}|${esc(l.to)}">✕</button></div>`).join("") : `<p class="note">No leave added.</p>`}
+      <div class="grid2" style="margin-top:10px"><label>From<input type="date" id="lf" min="${today}"></label><label>To (optional)<input type="date" id="lt" min="${today}"></label></div>
+      <label class="note" style="display:grid;gap:4px;margin-top:8px">Note (only you see it)<input type="text" id="ln" maxlength="80" placeholder="e.g. Conference"></label>
+      <button class="btn ghost" id="addLeave" style="margin-top:10px">Add leave</button>
+      <p class="note" style="margin-top:8px">Bookings already made on these days stay — cancel them from Upcoming if needed.</p>
+    </div>
+    <div class="card"><h3>Download bookings</h3><p class="note">A list of ${isDesk() ? esc(docName) + "'s" : "your patients'"} bookings for the month (opens in Excel). Keep it as your record — old bookings are removed from DotCom automatically after a year.</p>
+      <div class="acts"><button class="btn ghost" data-exp="${lastMonth}">${monthName(lastMonth)}</button><button class="btn ghost" data-exp="${thisMonth}">${monthName(thisMonth)}</button></div></div>
+    <button class="btn full save" id="saveTT">Save timetable</button>`;
+  const box = $("tt");
+  box.querySelectorAll("input[type=time]").forEach(i => i.onchange = () => { wk[i.dataset.d][+i.dataset.i][+i.dataset.e] = i.value; });
+  box.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { const [d, i] = b.dataset.del.split(":"); wk[d].splice(+i, 1); drawTT(); });
+  box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { const d = b.dataset.add; (wk[d] = wk[d] || []).push((wk[d] || []).length ? ["17:00", "20:00"] : ["10:00", "13:00"]); drawTT(); });
+  box.querySelectorAll("[data-lv]").forEach(b => b.onclick = () => { const [f, t] = b.dataset.lv.split("|"); s.leave = (s.leave || []).filter(l => !(l.from === f && (l.to || l.from) === t)); drawTT(); });
+  box.querySelectorAll("[data-exp]").forEach(b => b.onclick = () => exportMonth(b.dataset.exp, b));
+  $("addLeave").onclick = () => {
+    const f = $("lf").value, t = $("lt").value || f;
+    if (!f) return toast("Choose the first day of leave.");
+    if (t < f) return toast("The last day can't be before the first.");
+    (s.leave = s.leave || []).push({ from: f, to: t, note: $("ln").value.trim() }); drawTT(); toast("Added — tap Save timetable.");
+  };
+  $("saveTT").onclick = async () => {
+    for (const [k, n] of DAYS) for (const w of wk[k] || []) if (!w[0] || !w[1] || w[0] >= w[1]) return toast(`${n}: the end time must be after the start time.`);
+    const btn = $("saveTT"); btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      const body = { week: wk, leave: s.leave || [], gap: +$("gap").value, notice: +$("notice").value, ahead: +$("ahead").value, maxPerDay: +$("maxPerDay").value };
+      tt.s = (await post("/schedule", { doctor: ttDoc(), schedule: body })).schedule; drawTT(); toast("Timetable saved. Patients see the new times now.");
+    } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "Save timetable"; }
+  };
+}
+const fmtD = d => new Date(d + "T12:00:00Z").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+const monthName = m => new Date(m + "-15T12:00:00Z").toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+async function exportMonth(m, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch(API + "/export?month=" + m + "&doctor=" + encodeURIComponent(ttDoc()), { headers: { Authorization: "Bearer " + sess.token } });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not download.");
+    const url = URL.createObjectURL(await res.blob()); const a = document.createElement("a");
+    a.href = url; a.download = `${((sess.doctors.find(x => x.id === ttDoc()) || {}).name || "doctor").replace(/[^\w]+/g, "-")}-bookings-${m}.csv`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (e) { toast(e.message); }
+  btn.disabled = false;
+}
+
+/* ---------- leave / holiday (Cal.com) ---------- */
 let leave = { doc: "", items: null, err: "" };
 function leaveDoc() { return isDesk() ? (filter !== "all" ? filter : (leave.doc || sess.doctors[0].id)) : sess.role; }
 function leaveView() {

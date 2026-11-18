@@ -6,11 +6,7 @@
  *
  *   GET  /book/info?d=<doctor>&slug=<event slug>              -> {title, length, confirm, phone, fields}
  *   GET  /book/slots?d=&slug=&from=YYYY-MM-DD&days=14&tz=...  -> {slots: {"YYYY-MM-DD": ["ISO", ...]}}
- *   POST /book/create {d, slug, start, tz, name, email, phone, notes, extra, utr} -> {uid, status, start, t}
- * Patient's own "manage booking" link (manage.html?b=<uid>&d=<doctor>&t=<token>), needs opts.secret + the doctor's key:
- *   GET  /book/manage?b=&d=&t=                 -> {title, slug, start, end, status, name, canChange}
- *   POST /book/cancel     {b, d, t, reason}     -> {ok}
- *   POST /book/reschedule {b, d, t, start}      -> {uid, t, start}
+ *   POST /book/create {d, slug, start, tz, name, email, phone, notes, extra, utr} -> {uid, status, start}
  *
  * Nothing is stored: the booking goes straight into the doctor's own Cal.com.
  * who(docId) must return {key, username} for a known doctor (key may be empty: then the public
@@ -20,17 +16,9 @@
 const CAL = "https://api.cal.com/v2";
 const etCache = new Map();
 
-export function isBookPath(p) { return ["/book/info", "/book/slots", "/book/create", "/book/manage", "/book/cancel", "/book/reschedule"].includes(p); }
+export function isBookPath(p) { return p === "/book/info" || p === "/book/slots" || p === "/book/create"; }
 
-/* signed token for the patient's manage link (no login needed, only works for that one booking) */
-export async function manageToken(secret, docId, uid) {
-  const k = await crypto.subtle.importKey("raw", new TextEncoder().encode(String(secret || "")), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", k, new TextEncoder().encode("manage:" + docId + ":" + uid)));
-  let b = ""; for (const c of sig.slice(0, 18)) b += String.fromCharCode(c);
-  return btoa(b).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-export async function bookRoute(req, url, p, who, kv, opts = {}) {
+export async function bookRoute(req, url, p, who, kv) {
   const M = req.method;
   if (p === "/book/info" && M === "GET") {
     const { et } = await eventType(who, url.searchParams.get("d"), url.searchParams.get("slug"));
@@ -85,49 +73,10 @@ export async function bookRoute(req, url, p, who, kv, opts = {}) {
     const d = await calFetch({ key: "" }, "/bookings", { method: "POST", body: JSON.stringify(payload) }, "2024-08-13");
     const bk = Array.isArray(d.data) ? d.data[0] : (d.data || {});
     if (!bk.uid) throw bad(502, "The booking could not be saved. Please try again.");
-    const t = opts.secret ? await manageToken(opts.secret, String(b.d || "main"), bk.uid) : "";
-    return ok({ uid: bk.uid, status: String(bk.status || "").toLowerCase(), start: bk.start || payload.start, email, t });
+    return ok({ uid: bk.uid, status: String(bk.status || "").toLowerCase(), start: bk.start || payload.start, email });
   }
-  if (p === "/book/manage" || p === "/book/cancel" || p === "/book/reschedule") return manage(req, url, p, who, opts);
   throw bad(404, "Not found.");
 }
-
-/* ---------- patient's manage link ---------- */
-async function manage(req, url, p, who, opts) {
-  const M = req.method;
-  let a = {};
-  if (M === "GET" && p === "/book/manage") a = { b: url.searchParams.get("b"), d: url.searchParams.get("d"), t: url.searchParams.get("t") };
-  else if (M === "POST" && p !== "/book/manage") { try { a = await req.json(); } catch (e) { throw bad(400, "Bad request."); } }
-  else throw bad(404, "Not found.");
-  const uid = String(a.b || ""), docId = String(a.d || "main");
-  if (!opts.secret || !/^[A-Za-z0-9_-]{3,100}$/.test(uid) || !/^[a-z0-9-]{1,40}$/i.test(docId)) throw bad(400, "This link is not valid.");
-  if (!timingSafe(String(a.t || ""), await manageToken(opts.secret, docId, uid))) throw bad(403, "This link is not valid.");
-  const doc = await who(docId);
-  if (!doc || !doc.key) throw bad(400, "Online changes are not available. Please contact the clinic.");
-  const g = await calFetch(doc, "/bookings/" + encodeURIComponent(uid), {}, "2024-08-13");
-  const bk = Array.isArray(g.data) ? g.data[0] : (g.data || {});
-  const status = String(bk.status || "").toLowerCase();
-  const start = bk.start || bk.startTime;
-  const cutoff = (opts.cutoffHours ?? 2) * 3600e3;
-  const canChange = !!start && new Date(start).getTime() - Date.now() > cutoff && !/cancel|reject|declin/.test(status) && new Date(start) > new Date();
-  if (p === "/book/manage") {
-    const at = (bk.attendees && bk.attendees[0]) || {};
-    return ok({ title: (bk.eventType && bk.eventType.slug ? bk.title : bk.title) || "Consultation", slug: (bk.eventType && bk.eventType.slug) || bk.eventTypeSlug || "", start, end: bk.end || bk.endTime, status, name: at.name || "", canChange, cutoffHours: opts.cutoffHours ?? 2 });
-  }
-  if (!canChange) throw bad(409, "This booking can no longer be changed online. Please contact the clinic.");
-  if (p === "/book/cancel") {
-    const reason = String(a.reason || "").trim().slice(0, 300) || "Cancelled by the patient on the website";
-    await calFetch(doc, "/bookings/" + encodeURIComponent(uid) + "/cancel", { method: "POST", body: JSON.stringify({ cancellationReason: reason }) }, "2024-08-13");
-    return ok({ ok: true });
-  }
-  const ns = new Date(String(a.start || ""));
-  if (isNaN(ns) || ns.getTime() < Date.now() + 15 * 6e4) throw bad(400, "Please choose a time again.");
-  const r = await calFetch(doc, "/bookings/" + encodeURIComponent(uid) + "/reschedule", { method: "POST", body: JSON.stringify({ start: ns.toISOString(), reschedulingReason: "Changed by the patient on the website" }) }, "2024-08-13");
-  const nb = Array.isArray(r.data) ? r.data[0] : (r.data || {});
-  const nuid = nb.uid || uid;
-  return ok({ uid: nuid, t: await manageToken(opts.secret, docId, nuid), start: nb.start || ns.toISOString(), status: String(nb.status || "").toLowerCase() });
-}
-function timingSafe(a, b) { if (a.length !== b.length || !a.length) return false; let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0; }
 
 /* ---------- Cal.com ---------- */
 async function eventType(who, docId, slug) {
