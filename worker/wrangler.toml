@@ -38,9 +38,17 @@ DOCTORS_JSON = '''[{"id":"sample","name":"Dr. Sample Name","whatsapp":"971586576
 name = "CALS"
 class_name = "Calendar"
 
+[[durable_objects.bindings]]
+name = "ROOMS"          # own video: one room per consultation (connection messages only, nothing stored)
+class_name = "Room"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Calendar"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Room"]
 
 [[kv_namespaces]]
 binding = "PUSH"

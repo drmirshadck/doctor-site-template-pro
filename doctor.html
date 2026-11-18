@@ -160,6 +160,8 @@ const upiRef = n => (String(n).match(/UPI ref:\s*(\d{12})/i) || [])[1] || "";
 const phoneDigits = p => String(p).replace(/\D/g, "");
 const siteBase = () => location.origin + location.pathname.replace(/doctor\.html$/, "");
 const joinLink = docId => `${siteBase()}consult.html?d=${encodeURIComponent(docId)}`;
+// own video: the booking's own room (signed link from the helper)
+const roomLinkFor = b => (data.own && b.t) ? `${siteBase()}room.html?d=${encodeURIComponent(b.doctor)}&b=${encodeURIComponent(b.uid)}&t=${encodeURIComponent(b.t)}` : joinLink(b.doctor);
 
 function start() {
   $("hdrBtns").hidden = false; $("who").textContent = isDesk() ? "Front desk" : (sess.name || "Doctor");
@@ -192,7 +194,7 @@ function render() {
   document.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { filter = b.dataset.f; render(); });
   document.querySelectorAll("[data-ok]").forEach(b => b.onclick = () => confirmB(b));
   document.querySelectorAll("[data-no]").forEach(b => b.onclick = () => declineB(b.dataset.no, b.dataset.doc));
-  document.querySelectorAll("[data-call]").forEach(b => b.onclick = () => openRoom(b.dataset.call));
+  document.querySelectorAll("[data-call]").forEach(b => b.onclick = () => openRoom(b.dataset.call, b.dataset.uid));
   document.querySelectorAll("[data-fu]").forEach(b => b.onclick = () => followB(b.dataset.fu, b.dataset.doc));
   document.querySelectorAll("[data-ns]").forEach(b => b.onclick = () => noShowB(b));
   if ($("nb")) $("nb").onclick = enablePush;
@@ -204,11 +206,11 @@ function render() {
 function card(b) {
   const ref = upiRef(b.notes), ph = phoneDigits(b.phone);
   const other = b.notes.replace(/UPI ref:\s*\d{12}\s*(\(₹?\d+\))?/i, "").trim();
-  const msg = `Hello ${b.name}, your consultation with ${b.doctorName} is confirmed for ${day(b.start)} at ${time(b.start)} IST. Join here at that time: ${joinLink(b.doctor)}`;
+  const msg = `Hello ${b.name}, your consultation with ${b.doctorName} is confirmed for ${day(b.start)} at ${time(b.start)} IST. Join here at that time: ${roomLinkFor(b)}`;
   const acts = tab === "pending"
     ? `<button class="btn no" data-no="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Decline</button><button class="btn ok" data-ok="${esc(b.uid)}" data-doc="${esc(b.doctor)}" data-name="${esc(b.name)}">Confirm</button>`
     : tab === "upcoming"
-      ? `${ph ? `<a class="btn wa" href="${waUrl(ph, msg)}" target="_blank" rel="noopener">Send link</a>` : ""}${!isDesk() || true ? `<button class="btn" data-call="${esc(b.doctor)}">Start call</button>` : ""}${data.own ? `<button class="btn no" data-cx="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Cancel</button>` : ""}`
+      ? `${ph ? `<a class="btn wa" href="${waUrl(ph, msg)}" target="_blank" rel="noopener">Send link</a>` : ""}${!(data.own && isDesk()) ? `<button class="btn" data-call="${esc(b.doctor)}" data-uid="${esc(b.uid)}">Start call</button>` : ""}${data.own ? `<button class="btn no" data-cx="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Cancel</button>` : ""}`
       : `<button class="btn ghost" data-ns="${esc(b.uid)}" data-doc="${esc(b.doctor)}" ${b.absent ? "disabled" : ""}>${b.absent ? "Marked no-show" : "Patient didn't join"}</button><button class="btn" data-fu="${esc(b.uid)}" data-doc="${esc(b.doctor)}">Follow-up</button>`;
   return `<div class="card${tab === "upcoming" && isToday(b.start) ? " today" : ""}">
     <div class="top"><div><h3>${esc(b.name)}</h3><div class="meta"><span>${esc(b.title)}</span>${isDesk() ? `<span><span class="tag doc">${esc(b.doctorName)}</span></span>` : ""}</div></div>
@@ -253,7 +255,12 @@ async function noShowB(btn) {
   try { await post("/noshow", { uid: btn.dataset.ns, doctor: btn.dataset.doc }); toast("Marked as no-show."); await load(); }
   catch (e) { toast(e.message); btn.disabled = false; }
 }
-async function openRoom(docId) {
+async function openRoom(docId, uid) {
+  if (data.own && uid) {   // own video room: the doctor joins this booking's room
+    try { sessionStorage.setItem("dcbHost", sess.token); } catch (e) {}
+    location.href = `room.html?d=${encodeURIComponent(docId)}&b=${encodeURIComponent(uid)}&host=1`;
+    return;
+  }
   $("main").innerHTML = `<div class="empty">Opening the consultation room…</div>`;
   try { const d = await post("/host-token", { doctor: docId }); location.href = `consult.html?d=${encodeURIComponent(docId)}&host=${encodeURIComponent(d.token)}`; }
   catch (e) { $("main").innerHTML = `<div class="empty">${esc(e.message)}<br><br><button class="btn" onclick="location.href='doctor.html'">Back</button></div>`; }
