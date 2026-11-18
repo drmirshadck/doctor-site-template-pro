@@ -18,6 +18,7 @@ const jwk = await c.subtle.exportKey("jwk", kp.privateKey);
 const out = {
   PINS: JSON.stringify(pins),
   SESSION_SECRET: rand(32),
+  DATA_KEY: rand(32),   // own calendar: encrypts patient details. Keep a copy in Studio Desk; never change it once bookings exist.
   CAL_WEBHOOK_SECRET: rand(24),
   VAPID_PUBLIC_KEY: b64u(new Uint8Array(await c.subtle.exportKey("raw", kp.publicKey))),
   VAPID_PRIVATE_JWK: JSON.stringify({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, d: jwk.d })
